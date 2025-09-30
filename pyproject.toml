@@ -1,0 +1,10 @@
+[project]
+name = "paft-train"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "tensordict>=0.10.0",
+    "torchrl>=0.10.0",
+]
