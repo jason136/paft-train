@@ -1,9 +1,6 @@
 <mujoco model="mini_tars">
     <compiler angle="radian"/>  <!-- use radians to define angles -->
-    <option>
-        <!-- Note: if using mujoco version earlier than 3, set <option collision="predefined"/> instead -->
-        <flag contact="disable"/>
-    </option>
+    <!-- Contacts enabled (default). For MuJoCo < 3, you may set <option collision="predefined"/> -->
     <default>
         <!-- defaults for simple primitive geoms -->
         <geom type="box" density="100" rgba="0.7 0.7 0.7 1"/>
@@ -13,8 +10,13 @@
     </default>
     <!-- no mesh assets needed; using primitive boxes -->
     <worldbody>
+        <!-- Ground plane and a light for visibility -->
+        <light diffuse=".7 .7 .7" pos="0 0 3" dir="0 0 -1"/>
+        <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1"/>
         <!-- TARS body in real units (~0.42 m tall), prisms have 1:1:8 aspect -->
         <body name="tars" pos="0 0 0.21">
+            <!-- Free joint allows the body to translate/rotate for locomotion -->
+            <joint type="free"/>
             <!-- Center piece: two prisms conjoined (width = 2 * 0.0525 = 0.105 m) -->
             <geom name="body_center" size="0.0525 0.02625 0.21" rgba="0.7 0.7 0.7 1"/>
 
