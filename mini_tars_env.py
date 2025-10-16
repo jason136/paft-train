@@ -55,28 +55,64 @@ class MiniTarsMujocoEnv(MujocoEnv, EzPickle):
         qvel = self.data.qvel.ravel()
         return np.concatenate([qpos, qvel]).astype(np.float32)
 
+    
+    # legs synchronized, takes good first step but then starts sliding
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         action = np.clip(action, self.action_space.low, self.action_space.high)
-        xpos_before = float(self.data.qpos[0])  # world x position
+
+        xpos_before = float(self.data.qpos[0])
         self.do_simulation(action, self.frame_skip)
         xpos_after = float(self.data.qpos[0])
-        x_velocity = (xpos_after - xpos_before) / self.dt
 
-        # Reward shaping similar to standard MuJoCo locomotion tasks
-        forward_reward = x_velocity
+        forward_progress = xpos_after - xpos_before
         ctrl_cost = 1e-2 * float(np.sum(np.square(action)))
-        reward = forward_reward - ctrl_cost
+        backward_penalty = -2.0 if forward_progress < 0 else 0.0
+
+        # Joint indices
+        left_joint_idx = 0
+        right_joint_idx = 1
+
+        # Leg positions and velocities
+        left_pos = self.data.qpos[left_joint_idx]
+        right_pos = self.data.qpos[right_joint_idx]
+        left_vel = self.data.qvel[left_joint_idx]
+        right_vel = self.data.qvel[right_joint_idx]
+
+        # Leg synchrony
+        leg_pos_sync = -abs(left_pos - right_pos)
+        leg_vel_sync = -abs(left_vel - right_vel)
+
+        # Forward swing reward: only if both legs swing forward
+        leg_forward_swing = min(left_vel, right_vel) if left_vel > 0 and right_vel > 0 else 0.0
+
+        # Total reward
+        reward = (
+            forward_progress
+            + backward_penalty
+            - ctrl_cost
+            + 0.3 * leg_pos_sync
+            + 0.3 * leg_vel_sync 
+            + 0.4 * leg_forward_swing 
+        )
 
         observation = self._get_obs()
-        terminated = False
-        # Early termination if the torso falls below a threshold
         z_height = float(self.data.qpos[2])
-        if z_height < 0.05:
-            terminated = True
-
-        info: Dict = {"x_velocity": x_velocity, "forward_reward": forward_reward, "ctrl_cost": ctrl_cost}
+        terminated = z_height < 0.05
         truncated = False
+
+        info = {
+            "forward_progress": forward_progress,
+            "ctrl_cost": ctrl_cost,
+            "leg_pos_sync": leg_pos_sync,
+            "leg_vel_sync": leg_vel_sync,
+            "leg_forward_swing": leg_forward_swing,
+            "total_reward": reward,
+        }
+
         return observation, reward, terminated, truncated, info
+    
+
+
 
     def reset_model(self) -> np.ndarray:
         if self._domain_randomize:
