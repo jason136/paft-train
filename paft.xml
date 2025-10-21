@@ -1,9 +1,13 @@
 <mujoco model="mini_tars">
     <compiler angle="radian"/>  <!-- use radians to define angles -->
+    
+    <!-- Explicit physics settings -->
+    <option gravity="0 0 -9.81" timestep="0.002"/>
+    
     <!-- Contacts enabled (default). For MuJoCo < 3, you may set <option collision="predefined"/> -->
     <default>
         <!-- defaults for simple primitive geoms -->
-        <geom type="box" density="100" rgba="0.7 0.7 0.7 1"/>
+        <geom type="box" density="500" rgba="0.7 0.7 0.7 1"/>
         <joint type="hinge" limited="true" axis="0 1 0" damping="2" frictionloss="0.05" armature="0.002"/>
         <!-- position servo defaults (PD) for PWM-like behavior -->
         <position kp="40" kv="8"/>
@@ -12,31 +16,63 @@
     <worldbody>
         <!-- Ground plane and a light for visibility -->
         <light diffuse=".7 .7 .7" pos="0 0 3" dir="0 0 -1"/>
-        <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1"/>
+        <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" friction="0.8 0.05 0.005"/>
         <!-- TARS body in real units (~0.42 m tall), prisms have 1:1:8 aspect -->
         <body name="tars" pos="0 0 0.21">
             <!-- Free joint allows the body to translate/rotate for locomotion -->
             <joint type="free"/>
             <!-- Center piece: two prisms conjoined (width = 2 * 0.0525 = 0.105 m) -->
-            <geom name="body_center" size="0.0525 0.02625 0.21" rgba="0.7 0.7 0.7 1"/>
+            <geom name="body_center" size="0.0525 0.02625 0.21" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
 
-            <!-- Left arm: single prism, unit width 0.0525 m; hinge at x = -0.0525 -->
-            <body name="left_arm" pos="-0.0525 0 0">
-                <joint name="left_hinge" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265"/>
-                <geom name="left_arm_geom" size="0.02625 0.02625 0.21" pos="-0.02625 0 0" rgba="0.7 0.7 0.7 1"/>
+            <!-- Left arm: two-DOF (swing forward/back first, then shrug up/down nested inside) -->
+            <!-- Hinge at 70% up from bottom (0.084m above body center) for better leverage -->
+            <body name="left_arm" pos="-0.0525 0 0.084">
+                <!-- Swing joint: rotation around X axis for forward/back motion (servo controlled) -->
+                <joint name="left_swing" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265"/>
+                <!-- Small inertial properties for the hinge mechanism -->
+                <inertial pos="0 0 0" mass="0.01" diaginertia="0.0001 0.0001 0.0001"/>
+                <!-- Nested body for shrug mechanism -->
+                <body name="left_arm_segment" pos="0 0 0">
+                    <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
+                    <joint name="left_shrug" type="slide" axis="0 0 1" limited="true" range="-0.015 0.015"/>
+                    <!-- Explicit inertial: HEAVY mass at BOTTOM of arm for massive weight shifting -->
+                    <inertial pos="-0.02625 0 -0.21" mass="2.0" diaginertia="0.08 0.08 0.002"/>
+                    <!-- Arm geometry shifted down so top/bottom align with body when neutral -->
+                    <geom name="left_arm_geom" size="0.02625 0.02625 0.21" pos="-0.02625 0 -0.084" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
+                </body>
             </body>
 
-            <!-- Right arm: single prism, unit width 0.0525 m; hinge at x = +0.0525 -->
-            <body name="right_arm" pos="0.0525 0 0">
-                <joint name="right_hinge" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265"/>
-                <geom name="right_arm_geom" size="0.02625 0.02625 0.21" pos="0.02625 0 0" rgba="0.7 0.7 0.7 1"/>
+            <!-- Right arm: two-DOF (swing forward/back first, then shrug up/down nested inside) -->
+            <!-- Hinge at 70% up from bottom (0.084m above body center) for better leverage -->
+            <body name="right_arm" pos="0.0525 0 0.084">
+                <!-- Swing joint: rotation around X axis for forward/back motion (servo controlled) -->
+                <joint name="right_swing" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265"/>
+                <!-- Small inertial properties for the hinge mechanism -->
+                <inertial pos="0 0 0" mass="0.01" diaginertia="0.0001 0.0001 0.0001"/>
+                <!-- Nested body for shrug mechanism -->
+                <body name="right_arm_segment" pos="0 0 0">
+                    <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
+                    <joint name="right_shrug" type="slide" axis="0 0 1" limited="true" range="-0.015 0.015"/>
+                    <!-- Explicit inertial: HEAVY mass at BOTTOM of arm for massive weight shifting -->
+                    <inertial pos="0.02625 0 -0.21" mass="2.0" diaginertia="0.08 0.08 0.002"/>
+                    <!-- Arm geometry shifted down so top/bottom align with body when neutral -->
+                    <geom name="right_arm_geom" size="0.02625 0.02625 0.21" pos="0.02625 0 -0.084" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
+                </body>
             </body>
         </body>
     </worldbody>
 
     <actuator>
-        <!-- Position servos: ctrl is target angle in rad (map your PWM to angle) -->
-        <position name="left_arm_servo" joint="left_hinge" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-5 5"/>
-        <position name="right_arm_servo" joint="right_hinge" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-5 5"/>
+        <!-- Left arm actuators -->
+        <!-- Swing: Position servo (PWM controlled) -->
+        <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-5 5"/>
+        <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
+        <motor name="left_shrug_motor" joint="left_shrug" ctrllimited="true" ctrlrange="-10 10" gear="1"/>
+        
+        <!-- Right arm actuators -->
+        <!-- Swing: Position servo (PWM controlled) -->
+        <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-5 5"/>
+        <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
+        <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-10 10" gear="1"/>
     </actuator>
 </mujoco>
