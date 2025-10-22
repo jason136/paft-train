@@ -1,8 +1,8 @@
+import time
+
 import torch
 from torch.optim import Adam
-
 from tensordict.nn import TensorDictModule as Mod, TensorDictSequential as Seq
-
 from torchrl.envs import GymEnv, TransformedEnv, StepCounter
 from torchrl.modules import (
     MLP,
@@ -58,9 +58,9 @@ def make_sac_agent(env):
 
 
 def train(
-    total_frames=10_000_000,  # Much more training
+    total_frames=1_000_000,
     frames_per_batch=2000,
-    init_random_frames=50_000,  # Less random, more learning
+    init_random_frames=50_000,
     batch_size=256,
 ):
     torch.manual_seed(0)
@@ -99,6 +99,7 @@ def train(
 
     best_reward = float("-inf")
     total_frames_collected = 0
+    start_time = time.time()
 
     for i, data in enumerate(collector):
         rb.extend(data)
@@ -189,7 +190,7 @@ def train(
 
     env.close()
     print("\n" + "=" * 70)
-    print("Training complete!")
+    print(f"Training complete in {time.time() - start_time:.2f} seconds!")
     print(f"Best average reward achieved: {best_reward:.3f}")
     print("=" * 70)
 

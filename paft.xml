@@ -17,12 +17,20 @@
         <!-- Ground plane and a light for visibility -->
         <light diffuse=".7 .7 .7" pos="0 0 3" dir="0 0 -1"/>
         <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" friction="0.8 0.05 0.005"/>
+        
+        <!-- Target direction marker: simple red sphere showing desired heading -->
+        <site name="target_marker" pos="2 0 0.1" size="0.1" rgba="1 0 0 0.8" type="sphere"/>
         <!-- TARS body in real units (~0.42 m tall), prisms have 1:1:8 aspect -->
         <body name="tars" pos="0 0 0.21">
             <!-- Free joint allows the body to translate/rotate for locomotion -->
             <joint type="free"/>
             <!-- Center piece: two prisms conjoined (width = 2 * 0.0525 = 0.105 m) -->
             <geom name="body_center" size="0.0525 0.02625 0.21" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
+            <!-- IMU sensor site at body center for gyroscope and accelerometer -->
+            <site name="imu_site" pos="0 0 0" size="0.01"/>
+            
+            <!-- Camera that follows the robot -->
+            <camera name="follow_cam" pos="0 -1.5 1.0" xyaxes="1 0 0 0 0.7 0.7" fovy="60"/>
 
             <!-- Left arm: two-DOF (swing forward/back first, then shrug up/down nested inside) -->
             <!-- Hinge at 70% up from bottom (0.084m above body center) for better leverage -->
@@ -75,4 +83,16 @@
         <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
         <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-10 10" gear="1"/>
     </actuator>
+
+    <sensor>
+        <!-- IMU sensors: gyroscope and accelerometer at body center -->
+        <gyro name="body_gyro" site="imu_site"/>
+        <accelerometer name="body_accel" site="imu_site"/>
+        
+        <!-- Joint position encoders: automatically handle linear vs rotational -->
+        <jointpos name="left_shoulder_encoder" joint="left_shrug"/>    <!-- Linear position (meters) -->
+        <jointpos name="right_shoulder_encoder" joint="right_shrug"/>  <!-- Linear position (meters) -->
+        <jointpos name="left_arm_encoder" joint="left_swing"/>         <!-- Angular position (radians) -->
+        <jointpos name="right_arm_encoder" joint="right_swing"/>       <!-- Angular position (radians) -->
+    </sensor>
 </mujoco>

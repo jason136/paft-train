@@ -56,8 +56,9 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
             dtype=np.float32,
         )
 
-        # Observation space: qpos + qvel + target_direction (2D unit vector)
-        obs_dim = self.model.nq + self.model.nv + 2
+        # Observation space: MuJoCo sensors(10) + relative_heading(2) = 12 total
+        # Sensors: gyro(3) + accel(3) + left_shoulder(1) + right_shoulder(1) + left_arm(1) + right_arm(1)
+        obs_dim = 10 + 2  # = 12 total
         high = np.inf * np.ones(obs_dim, dtype=np.float32)
         self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
@@ -65,14 +66,71 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
         self._target_heading: float = 0.0  # target angle in radians
 
     def _get_obs(self) -> np.ndarray:
-        qpos = self.data.qpos.ravel()
-        qvel = self.data.qvel.ravel()
-        # Add target direction as 2D unit vector (cos, sin)
-        target_dir = np.array(
-            [np.cos(self._target_heading), np.sin(self._target_heading)],
+        # Get sensor readings from MuJoCo sensors (first 10 values)
+        # Order: gyro(3) + accel(3) + left_shoulder(1) + right_shoulder(1) + left_arm(1) + right_arm(1)
+        sensor_data = self.data.sensordata[:10].copy().astype(np.float32)
+
+        # Calculate relative heading: target direction in robot's local coordinate frame
+        # Extract quaternion for coordinate transformation
+        qw, qx, qy, qz = (
+            self.data.qpos[3],
+            self.data.qpos[4],
+            self.data.qpos[5],
+            self.data.qpos[6],
+        )
+
+        # Convert quaternion to rotation matrix (world to body transform)
+        R = np.array(
+            [
+                [
+                    1 - 2 * (qy**2 + qz**2),
+                    2 * (qx * qy - qw * qz),
+                    2 * (qx * qz + qw * qy),
+                ],
+                [
+                    2 * (qx * qy + qw * qz),
+                    1 - 2 * (qx**2 + qz**2),
+                    2 * (qy * qz - qw * qx),
+                ],
+                [
+                    2 * (qx * qz - qw * qy),
+                    2 * (qy * qz + qw * qx),
+                    1 - 2 * (qx**2 + qy**2),
+                ],
+            ],
             dtype=np.float32,
         )
-        return np.concatenate([qpos, qvel, target_dir]).astype(np.float32)
+
+        # Transform target direction to robot's local frame
+        world_target_dir = np.array(
+            [np.cos(self._target_heading), np.sin(self._target_heading), 0.0],
+            dtype=np.float32,
+        )
+        local_target_dir_3d = R @ world_target_dir
+        local_target_dir = local_target_dir_3d[0:2]  # Take only x,y components
+
+        # Concatenate sensor data with relative heading
+        obs = np.concatenate(
+            [
+                sensor_data,  # 10 values: all MuJoCo sensor readings
+                local_target_dir,  # 2 values: relative heading in local frame
+            ]
+        ).astype(np.float32)
+
+        return obs
+
+    def _update_target_marker(self) -> None:
+        """Update the simple target marker position - only called at reset."""
+        robot_pos = self.data.qpos[0:2]  # x, y position
+        
+        # Place target marker 2m away in the desired direction
+        target_distance = 2.0
+        target_x = robot_pos[0] + target_distance * np.cos(self._target_heading)
+        target_y = robot_pos[1] + target_distance * np.sin(self._target_heading)
+        
+        # Update target marker position
+        marker_site_id = self.model.site("target_marker").id
+        self.model.site_pos[marker_site_id] = [target_x, target_y, 0.1]
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         action = np.clip(action, self.action_space.low, self.action_space.high)
@@ -105,12 +163,32 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
             np.sum(np.square(action))
         )  # Very low penalty for trying things
 
-        # Stability: penalize if robot is too low (falling)
-        z_height = float(self.data.qpos[2])
-        height_penalty = -5.0 if z_height < 0.10 else 0.0  # Penalty for falling
+        # Body angle penalty: discourage robot from laying down below 45 degrees
+        # Calculate pitch angle from quaternion (body tilt forward/backward)
+        qw, qx, qy, qz = (
+            self.data.qpos[3],
+            self.data.qpos[4],
+            self.data.qpos[5],
+            self.data.qpos[6],
+        )
 
-        # REMOVE height bonus - standing still should NOT be rewarded
-        height_bonus = 1.0 if z_height > 0.15 else 0.0
+        # Convert quaternion to pitch angle (rotation around Y axis)
+        # pitch = arcsin(2 * (qw * qy - qz * qx))
+        pitch_angle = np.arcsin(2 * (qw * qy - qz * qx))
+        pitch_degrees = np.abs(
+            np.degrees(pitch_angle)
+        )  # Get absolute angle from upright
+
+        # Calculate body angle penalty - increasing penalty when further from upright
+        if pitch_degrees > 45.0:  # Robot is tilted more than 45 degrees from upright
+            # Exponentially increasing penalty as robot lays down more
+            angle_penalty = (
+                -0.1 * (pitch_degrees - 45.0) ** 2 / 45.0
+            )  # Quadratic penalty
+        else:
+            angle_penalty = 0.0
+
+        z_height = float(self.data.qpos[2])
 
         # Encourage leg movement (gait) - legs should be active, not static
         # Joint order: left_swing, left_shrug, right_swing, right_shrug
@@ -126,8 +204,7 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
             2.0 * velocity_toward_target  # Scaled down from 20
             + 1.0 * velocity_magnitude  # Scaled down from 5
             + 0.2 * leg_activity  # Scaled down from 2
-            + height_penalty
-            + 0.1 * height_bonus
+            + angle_penalty  # New: penalty for laying down below 45 degrees
         )
 
         observation = self._get_obs()
@@ -144,68 +221,60 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
         # Randomize target heading (0 to 2π radians)
         self._target_heading = self.np_random.uniform(0, 2 * np.pi)
 
-        # Much more aggressive initial randomization to help discover gaits
+        # Conservative initial randomization - prevent ground clipping while maintaining exploration
         qpos = self.init_qpos.copy()
 
-        # Keep base position roughly stable but allow some variation
-        qpos[0] += self.np_random.uniform(-0.1, 0.1)  # x position
-        qpos[1] += self.np_random.uniform(-0.1, 0.1)  # y position
-        qpos[2] += self.np_random.uniform(-0.02, 0.05)  # z height variation
+        # Small position variations - keep robot well above ground
+        qpos[0] += self.np_random.uniform(-0.05, 0.05)  # x position: ±5cm
+        qpos[1] += self.np_random.uniform(-0.05, 0.05)  # y position: ±5cm
+        qpos[2] += self.np_random.uniform(
+            0.0, 0.03
+        )  # z height: only UP 0-3cm (prevent ground clipping)
 
-        # Keep body mostly upright - only small rotations around Z axis (yaw)
-        # This ensures arms stay in their valid planes of rotation
-        yaw = self.np_random.uniform(-0.2, 0.2)  # ±11 degrees rotation around Z
-        # Quaternion for rotation around Z axis: [cos(θ/2), 0, 0, sin(θ/2)]
+        # Small yaw variations for diverse starting orientations
+        yaw = self.np_random.uniform(-0.3, 0.3)  # ±17 degrees
         qpos[3] = np.cos(yaw / 2)  # w
         qpos[4] = 0.0  # x
         qpos[5] = 0.0  # y
         qpos[6] = np.sin(yaw / 2)  # z
 
-        # Randomize arm angles significantly to explore gaits
-        # Arms can only move in their defined planes of rotation
+        # MUCH smaller joint angle variations to prevent clipping
         # Joint order: left_swing, left_shrug, right_swing, right_shrug
-        # Start from neutral with safe variations to prevent body clipping
 
-        # Swing joints: rotation around X axis (forward/back motion) - ANGULAR (radians)
-        qpos[7] = self.np_random.uniform(-1.2, 1.2)  # left swing: ±69 degrees
-        qpos[9] = self.np_random.uniform(-1.2, 1.2)  # right swing: ±69 degrees
+        # Swing joints: SAFE angular ranges to prevent ground penetration
+        qpos[7] = self.np_random.uniform(
+            -0.3, 0.3
+        )  # left swing: ±17 degrees (vs ±69 before!)
+        qpos[9] = self.np_random.uniform(-0.3, 0.3)  # right swing: ±17 degrees
 
-        # Shrug joints: LINEAR slide up/down along Z axis - POSITION (meters)
+        # Shrug joints: Small vertical variations
         qpos[8] = self.np_random.uniform(
-            -0.03, 0.03
-        )  # left shrug: ±3cm vertical motion
-        qpos[10] = self.np_random.uniform(
-            -0.03, 0.03
-        )  # right shrug: ±3cm vertical motion
+            -0.01, 0.01
+        )  # left shrug: ±1cm (vs ±3cm before)
+        qpos[10] = self.np_random.uniform(-0.01, 0.01)  # right shrug: ±1cm
 
-        # Give initial velocities to encourage movement exploration
+        # Realistic initial velocities - like a robot gently starting up
         qvel = self.init_qvel.copy()
-        qvel[0] = self.np_random.uniform(-0.5, 0.5)  # x velocity
-        qvel[1] = self.np_random.uniform(-0.5, 0.5)  # y velocity
+        qvel[0] = self.np_random.uniform(-0.1, 0.1)  # gentle x velocity
+        qvel[1] = self.np_random.uniform(-0.1, 0.1)  # gentle y velocity
 
-        # Add rotational momentum - robot starts spinning
-        qvel[3] = self.np_random.uniform(-2.0, 2.0)  # angular velocity around x (roll)
-        qvel[4] = self.np_random.uniform(-2.0, 2.0)  # angular velocity around y (pitch)
-        qvel[5] = self.np_random.uniform(
-            -3.0, 3.0
-        )  # angular velocity around z (yaw) - stronger
+        # Small rotational velocities - no wild spinning
+        qvel[3] = self.np_random.uniform(-0.5, 0.5)  # gentle roll
+        qvel[4] = self.np_random.uniform(-0.5, 0.5)  # gentle pitch
+        qvel[5] = self.np_random.uniform(-0.5, 0.5)  # gentle yaw
 
-        # Arms start moving wildly
-        qvel[6] = self.np_random.uniform(
-            -4.0, 4.0
-        )  # left swing angular velocity - INCREASED
-        qvel[7] = self.np_random.uniform(
-            -3.0, 3.0
-        )  # left shrug angular velocity - INCREASED
-        qvel[8] = self.np_random.uniform(
-            -4.0, 4.0
-        )  # right swing angular velocity - INCREASED
-        qvel[9] = self.np_random.uniform(
-            -3.0, 3.0
-        )  # right shrug angular velocity - INCREASED
+        # Gentle joint movement - realistic servo startup
+        qvel[6] = self.np_random.uniform(-0.5, 0.5)  # left swing: gentle start
+        qvel[7] = self.np_random.uniform(-0.2, 0.2)  # left shrug: gentle start
+        qvel[8] = self.np_random.uniform(-0.5, 0.5)  # right swing: gentle start
+        qvel[9] = self.np_random.uniform(-0.2, 0.2)  # right shrug: gentle start
 
         self.set_state(qpos, qvel)
         self._prev_x = float(self.data.qpos[0])
+        
+        # Update target marker for debugging
+        self._update_target_marker()
+        
         return self._get_obs()
 
     def _randomize_domain(self) -> None:
