@@ -1,7 +1,9 @@
 import time
+import os
 
 import torch
 from torch.optim import Adam
+from torch.nn.utils import clip_grad_norm_
 from tensordict.nn import TensorDictModule as Mod, TensorDictSequential as Seq
 from torchrl.envs import GymEnv, TransformedEnv, StepCounter
 from torchrl.modules import (
@@ -20,7 +22,7 @@ from torchrl.record import CSVLogger, VideoRecorder
 def make_env():
     import paft_env
 
-    return TransformedEnv(GymEnv("Paft-v0"), StepCounter(max_steps=250))
+    return TransformedEnv(GymEnv("Paft-v0"), StepCounter(max_steps=500))
 
 
 def make_sac_agent(env):
@@ -58,10 +60,11 @@ def make_sac_agent(env):
 
 
 def train(
-    total_frames=1_000_000,
-    frames_per_batch=2000,
-    init_random_frames=50_000,
+    total_frames=12_000_000,
+    frames_per_batch=3000,
+    init_random_frames=120_000,
     batch_size=256,
+    utd_ratio=1.0,
 ):
     torch.manual_seed(0)
 
@@ -75,13 +78,13 @@ def train(
         qvalue_network=qvalue,
         num_qvalue_nets=2,
         loss_function="smooth_l1",
-        target_entropy=-1.0,  # HIGH entropy = MORE exploration
+        target_entropy=-2.0,
     )
     loss_fn.make_value_estimator()
 
-    actor_optim = Adam(loss_fn.actor_network_params.flatten_keys().values(), lr=5e-4)
-    q_optim = Adam(loss_fn.qvalue_network_params.flatten_keys().values(), lr=5e-4)
-    alpha_optim = Adam([loss_fn.log_alpha], lr=5e-4)
+    actor_optim = Adam(loss_fn.actor_network_params.flatten_keys().values(), lr=3e-4)
+    q_optim = Adam(loss_fn.qvalue_network_params.flatten_keys().values(), lr=3e-4)
+    alpha_optim = Adam([loss_fn.log_alpha], lr=3e-4)
 
     target_updater = SoftUpdate(loss_fn, eps=0.995)
 
@@ -111,7 +114,8 @@ def train(
             )
             continue
 
-        num_updates = frames_per_batch // batch_size
+        num_updates = int(frames_per_batch * utd_ratio)
+
         for update_idx in range(num_updates):
             sample = rb.sample(batch_size)
 
@@ -119,15 +123,21 @@ def train(
             loss_vals = loss_fn(sample)
             q_optim.zero_grad()
             loss_vals["loss_qvalue"].backward()
+            clip_grad_norm_(
+                loss_fn.qvalue_network_params.flatten_keys().values(), max_norm=1.0
+            )
             q_optim.step()
 
-            # Update actor (recompute after Q update)
+            # Update actor (recompute with updated Q-networks)
             loss_vals = loss_fn(sample)
             actor_optim.zero_grad()
             loss_vals["loss_actor"].backward()
+            clip_grad_norm_(
+                loss_fn.actor_network_params.flatten_keys().values(), max_norm=1.0
+            )
             actor_optim.step()
 
-            # Update alpha (recompute after actor update)
+            # Update alpha (recompute with updated actor)
             loss_vals = loss_fn(sample)
             alpha_optim.zero_grad()
             loss_vals["loss_alpha"].backward()
@@ -144,6 +154,20 @@ def train(
             best_reward = avg_reward
 
         alpha_value = loss_fn.log_alpha.exp().item()
+        
+        # DEBUG: Check what the policy is actually outputting
+        with torch.no_grad():
+            sample_obs = data["observation"][:5]  # Take 5 observations
+            # Create a proper tensordict for the actor
+            from tensordict import TensorDict
+            obs_dict = TensorDict({"observation": sample_obs}, batch_size=sample_obs.shape[0])
+            policy_out = actor(obs_dict)
+            if "scale" in policy_out.keys():
+                avg_scale = policy_out["scale"].mean().item()
+                min_scale = policy_out["scale"].min().item()
+                max_scale = policy_out["scale"].max().item()
+                print(f"\n[DEBUG] Policy output scale - avg: {avg_scale:.4f}, min: {min_scale:.4f}, max: {max_scale:.4f}")
+                print(f"[DEBUG] Sample action: {policy_out['action'][0].cpu().numpy()}")
 
         print(f"\n{'='*70}")
         print(
@@ -159,22 +183,10 @@ def train(
         )
 
         # Detailed info every 10 iterations
-        if i % 10 == 0 and i > 0:
-            info_keys = data.get("next", {}).get("info", {})
-            if info_keys:
-                print(f"\nEnvironment Info:")
-                for key in [
-                    "velocity_toward_target",
-                    "forward_speed",
-                    "velocity_perpendicular",
-                    "z_height",
-                    "leg_activity",
-                ]:
-                    if key in info_keys:
-                        val = info_keys[key].mean().item()
-                        print(f"  {key}: {val:.4f}")
-
-            print(f"\nRecording video at iteration {i}...")
+        if i % 5 == 0 and i > 0:
+            print(f"\n{'─'*70}")
+            print(f"Recording video at iteration {i}...")
+            print(f"{'─'*70}")
             video_recorder = VideoRecorder(logger, tag=f"training_iter_{i}")
             record_env = TransformedEnv(
                 GymEnv("Paft-v0", from_pixels=True, pixels_only=False),
@@ -193,6 +205,25 @@ def train(
     print(f"Training complete in {time.time() - start_time:.2f} seconds!")
     print(f"Best average reward achieved: {best_reward:.3f}")
     print("=" * 70)
+
+    # Save model checkpoint
+    checkpoint_dir = "./checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, "sac_paft_final.pt")
+
+    print(f"\nSaving model checkpoint to {checkpoint_path}...")
+    torch.save(
+        {
+            "actor_state_dict": actor.state_dict(),
+            "qvalue_state_dict": qvalue.state_dict(),
+            "actor_optim_state_dict": actor_optim.state_dict(),
+            "q_optim_state_dict": q_optim.state_dict(),
+            "alpha_optim_state_dict": alpha_optim.state_dict(),
+            "log_alpha": loss_fn.log_alpha,
+        },
+        checkpoint_path,
+    )
+    print(f"✓ Model saved successfully!")
 
     # Record final video of trained policy
     print("\nRecording final video...")

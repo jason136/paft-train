@@ -2,39 +2,51 @@
     <compiler angle="radian"/>  <!-- use radians to define angles -->
     
     <!-- Explicit physics settings -->
-    <option gravity="0 0 -9.81" timestep="0.002"/>
+    <option gravity="0 0 -9.81" timestep="0.002">
+        <!-- Improved collision detection and contact handling -->
+        <flag contact="enable" override="enable"/>
+    </option>
+    
+    <!-- Solver settings for more accurate contact resolution and preventing interpenetration -->
+    <size nconmax="100" njmax="500"/>
+    <option>
+        <flag warmstart="enable"/>
+    </option>
     
     <!-- Contacts enabled (default). For MuJoCo < 3, you may set <option collision="predefined"/> -->
     <default>
         <!-- defaults for simple primitive geoms -->
-        <geom type="box" density="500" rgba="0.7 0.7 0.7 1"/>
-        <joint type="hinge" limited="true" axis="0 1 0" damping="2" frictionloss="0.05" armature="0.002"/>
-        <!-- position servo defaults (PD) for PWM-like behavior -->
-        <position kp="40" kv="8"/>
+        <geom type="box" density="500" rgba="0.7 0.7 0.7 1" solref="0.002 1" solimp="0.99 0.999 0.001"/>
+        <joint type="hinge" limited="true" axis="0 1 0" damping="2.0" frictionloss="0.08" armature="0.005"/>
+        <!-- position servo defaults (PD) - reduced kp for slower acceleration -->
+        <position kp="40" kv="10"/>
     </default>
     <!-- no mesh assets needed; using primitive boxes -->
     <worldbody>
         <!-- Ground plane and a light for visibility -->
         <light diffuse=".7 .7 .7" pos="0 0 3" dir="0 0 -1"/>
-        <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" friction="0.8 0.05 0.005"/>
+        <!-- Very high friction to prevent sliding - robot MUST lift feet to move -->
+        <!-- friction="sliding torsional rolling" -->
+        <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" friction="5.0 1.0 0.005"/>
         
-        <!-- Target direction marker: simple red sphere showing desired heading -->
-        <site name="target_marker" pos="2 0 0.1" size="0.1" rgba="1 0 0 0.8" type="sphere"/>
-        <!-- TARS body in real units (~0.42 m tall), prisms have 1:1:8 aspect -->
-        <body name="tars" pos="0 0 0.21">
+        <!-- TARS body: 480mm tall, 214mm wide (with arms), 54mm deep -->
+        <!-- Body is 107mm wide (half of total), each arm is 53.5mm (quarter of total) -->
+        <body name="tars" pos="0 0 0.24">
             <!-- Free joint allows the body to translate/rotate for locomotion -->
             <joint type="free"/>
-            <!-- Center piece: two prisms conjoined (width = 2 * 0.0525 = 0.105 m) -->
-            <geom name="body_center" size="0.0525 0.02625 0.21" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
+            <!-- Center piece: 107mm × 54mm × 480mm = 0.107 × 0.054 × 0.48m -->
+            <!-- Explicit inertial for torso: 2.5 kg mass, center of mass lowered -->
+            <inertial pos="0 0 -0.05" mass="2.5" diaginertia="0.05 0.05 0.001"/>
+            <geom name="body_center" size="0.0535 0.027 0.24" rgba="0.7 0.7 0.7 1" friction="5.0 1.0 0.005"/>
+            <!-- Black screen on front face (like TARS from Interstellar) -->
+            <!-- Paper-thin horizontal strip, full width, 80% up from bottom -->
+            <geom name="front_screen" type="box" size="0.0535 0.0002 0.03" pos="0 0.0271 0.144" rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" mass="0" group="1"/>
             <!-- IMU sensor site at body center for gyroscope and accelerometer -->
             <site name="imu_site" pos="0 0 0" size="0.01"/>
             
-            <!-- Camera that follows the robot -->
-            <camera name="follow_cam" pos="0 -1.5 1.0" xyaxes="1 0 0 0 0.7 0.7" fovy="60"/>
-
             <!-- Left arm: two-DOF (swing forward/back first, then shrug up/down nested inside) -->
-            <!-- Hinge at 70% up from bottom (0.084m above body center) for better leverage -->
-            <body name="left_arm" pos="-0.0525 0 0.084">
+            <!-- Hinge at 70% up from bottom (0.336m from ground, 0.096m above body center) -->
+            <body name="left_arm" pos="-0.0535 0 0.096">
                 <!-- Swing joint: rotation around X axis for forward/back motion (servo controlled) -->
                 <joint name="left_swing" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265"/>
                 <!-- Small inertial properties for the hinge mechanism -->
@@ -43,16 +55,19 @@
                 <body name="left_arm_segment" pos="0 0 0">
                     <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
                     <joint name="left_shrug" type="slide" axis="0 0 1" limited="true" range="-0.015 0.015"/>
-                    <!-- Explicit inertial: HEAVY mass at BOTTOM of arm for massive weight shifting -->
-                    <inertial pos="-0.02625 0 -0.21" mass="2.0" diaginertia="0.08 0.08 0.002"/>
-                    <!-- Arm geometry shifted down so top/bottom align with body when neutral -->
-                    <geom name="left_arm_geom" size="0.02625 0.02625 0.21" pos="-0.02625 0 -0.084" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
+                    <!-- Explicit inertial: mass concentrated at bottom of arm -->
+                    <!-- Arm: 53.5mm × 54mm × 480mm = 0.0535 × 0.054 × 0.48m, mass=1.5kg -->
+                    <!-- I_x = I_y = m/12 × (y² + z²) = 1.5/12 × (0.054² + 0.48²) = 0.0289 -->
+                    <!-- I_z = m/12 × (x² + y²) = 1.5/12 × (0.0535² + 0.054²) = 0.00072 -->
+                    <inertial pos="-0.02675 0 -0.24" mass="1.5" diaginertia="0.0289 0.0289 0.00072"/>
+                    <!-- Arm geometry: half the body width, same depth, aligned with body bottom -->
+                    <geom name="left_arm_geom" size="0.02675 0.027 0.24" pos="-0.02675 0 -0.096" rgba="0.7 0.7 0.7 1" friction="5.0 1.0 0.005"/>
                 </body>
             </body>
 
             <!-- Right arm: two-DOF (swing forward/back first, then shrug up/down nested inside) -->
-            <!-- Hinge at 70% up from bottom (0.084m above body center) for better leverage -->
-            <body name="right_arm" pos="0.0525 0 0.084">
+            <!-- Hinge at 70% up from bottom (0.336m from ground, 0.096m above body center) -->
+            <body name="right_arm" pos="0.0535 0 0.096">
                 <!-- Swing joint: rotation around X axis for forward/back motion (servo controlled) -->
                 <joint name="right_swing" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265"/>
                 <!-- Small inertial properties for the hinge mechanism -->
@@ -61,27 +76,36 @@
                 <body name="right_arm_segment" pos="0 0 0">
                     <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
                     <joint name="right_shrug" type="slide" axis="0 0 1" limited="true" range="-0.015 0.015"/>
-                    <!-- Explicit inertial: HEAVY mass at BOTTOM of arm for massive weight shifting -->
-                    <inertial pos="0.02625 0 -0.21" mass="2.0" diaginertia="0.08 0.08 0.002"/>
-                    <!-- Arm geometry shifted down so top/bottom align with body when neutral -->
-                    <geom name="right_arm_geom" size="0.02625 0.02625 0.21" pos="0.02625 0 -0.084" rgba="0.7 0.7 0.7 1" friction="0.8 0.05 0.005"/>
+                    <!-- Explicit inertial: mass concentrated at bottom of arm -->
+                    <!-- Arm: 53.5mm × 54mm × 480mm = 0.0535 × 0.054 × 0.48m, mass=1.5kg -->
+                    <!-- I_x = I_y = m/12 × (y² + z²) = 1.5/12 × (0.054² + 0.48²) = 0.0289 -->
+                    <!-- I_z = m/12 × (x² + y²) = 1.5/12 × (0.0535² + 0.054²) = 0.00072 -->
+                    <inertial pos="0.02675 0 -0.24" mass="1.5" diaginertia="0.0289 0.0289 0.00072"/>
+                    <!-- Arm geometry: half the body width, same depth, aligned with body bottom -->
+                    <geom name="right_arm_geom" size="0.02675 0.027 0.24" pos="0.02675 0 -0.096" rgba="0.7 0.7 0.7 1" friction="5.0 1.0 0.005"/>
                 </body>
             </body>
         </body>
+        
+        <!-- Visual arrow for target heading - thin box starting from robot position -->
+        <geom name="target_arrow" type="box" size="0.1 0.002 0.002" pos="0 0 0.5" rgba="1 0 0 0.6" contype="0" conaffinity="0" mass="0" group="1"/>
+        
+        <!-- Tracking camera that follows the robot -->
+        <camera name="track" mode="trackcom" pos="0 -0.6 1.0" xyaxes="1 0 0 0 1.2 1"/>
     </worldbody>
 
     <actuator>
         <!-- Left arm actuators -->
         <!-- Swing: Position servo (PWM controlled) -->
-        <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-5 5"/>
+        <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-15 15"/>
         <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
-        <motor name="left_shrug_motor" joint="left_shrug" ctrllimited="true" ctrlrange="-10 10" gear="1"/>
+        <motor name="left_shrug_motor" joint="left_shrug" ctrllimited="true" ctrlrange="-50 50" gear="1"/>
         
         <!-- Right arm actuators -->
         <!-- Swing: Position servo (PWM controlled) -->
-        <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-5 5"/>
+        <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-15 15"/>
         <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
-        <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-10 10" gear="1"/>
+        <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-50 50" gear="1"/>
     </actuator>
 
     <sensor>
