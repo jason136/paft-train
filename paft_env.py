@@ -226,11 +226,11 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
             6:10
         ]  # left_swing, left_shrug, right_swing, right_shrug
 
-        # 1. HIGH VELOCITY: Reward fast joint movements (squared to favor large over small)
+        # 1. HIGH VELOCITY: Reward fast joint movements (linear to be more stable)
         swing_velocity = (abs(joint_vel[0]) + abs(joint_vel[2])) / 2.0
         shrug_velocity = (abs(joint_vel[1]) + abs(joint_vel[3])) / 2.0
-        # Square the velocities to heavily favor large movements over jittery ones
-        velocity_reward = (swing_velocity**2) + (shrug_velocity**2)
+        # Linear velocity reward is more stable than squared
+        velocity_reward = swing_velocity + shrug_velocity
 
         # 2. SMOOTHNESS: Penalize rapid changes in velocity (jerk)
         # Jittering = high acceleration changes, smooth swings = consistent velocity
@@ -242,8 +242,8 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
             total_jerk = swing_jerk + shrug_jerk
             # Penalize jerkiness (subtract from reward)
             smoothness_penalty = (
-                total_jerk * 5.0
-            )  # High penalty for rapid direction changes
+                total_jerk * 1.0
+            )  # Reduced penalty to allow more movement
         else:
             smoothness_penalty = 0.0
 
@@ -279,21 +279,27 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
         action_magnitude = np.linalg.norm(action) / np.sqrt(len(action))
         bold_action_reward = action_magnitude**2
 
+        # 6. SYNC REWARD: Reward moving arms in sync
+        # Product of velocities: positive when moving in same direction
+        sync_reward = joint_vel[0] * joint_vel[2] + joint_vel[1] * joint_vel[3]
+
         # Combine: reward fast, smooth, large-range movements with crossing
         activity_reward = (
-            # 0.3 * velocity_reward  # Fast movements (squared, but scaled down)
-            # - 0.5 * smoothness_penalty  # Moderate penalty for jerkiness
-            # + 0.2 * range_reward  # Use full range of motion
-            + 0.8 * crossing_reward  # Reward crossing through neutral plane
+            0.25 * velocity_reward  # Fast movements
+            - 1.0 * smoothness_penalty  # Moderate penalty for jerkiness
+            # + 1.0 * range_reward  # Use full range of motion
+            + 10.0
+            * crossing_reward  # Strong reward for crossing neutral plane (cycles)
+            + 1.0 * sync_reward  # Small reward for moving arms in sync
             # + 0.1 * bold_action_reward  # Bold actions
         )
 
-        # EXPLORATION-FRIENDLY REWARD: Only reward, never punish
+        # EXPLORATION-FRIENDLY REWARD: Balanced task + exploration
         reward = (
-            30.0 * max(0, velocity_toward_target)  # PRIMARY: move toward target!
-            + 2.0 * velocity_magnitude  # SECONDARY: any movement is good
-            + 10.0 * max(0, heading_alignment)  # TERTIARY: face target direction
-            + 1.0 * activity_reward  # QUATERNARY: large, smooth sweeping movements
+            10.0 * max(0, velocity_toward_target)  # PRIMARY: move toward target!
+            # + 5.0 * velocity_magnitude  # SECONDARY: any movement is good
+            + 5.0 * max(0, heading_alignment)  # TERTIARY: face target direction
+            + 1.0 * activity_reward  # QUATERNARY: activity reward
         )
 
         observation = self._get_obs()
@@ -327,9 +333,7 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
         # Small position variations to prevent overfitting to spawn location
         qpos[0] += self.np_random.uniform(-0.1, 0.1)  # x position: ±10cm
         qpos[1] += self.np_random.uniform(-0.1, 0.1)  # y position: ±10cm
-        qpos[2] += self.np_random.uniform(
-            0.0, 0.02
-        )  # z height: 0-2cm up (small variation)
+        qpos[2] += self.np_random.uniform(0.0, 0.005)  # z height: 0-0.5cm up (grounded)
 
         # Varied yaw for diverse starting orientations
         yaw = self.np_random.uniform(-np.pi, np.pi)  # Full 360 degrees is fine
@@ -341,9 +345,9 @@ class PaftMujocoEnv(MujocoEnv, EzPickle):
         # Reasonable joint positions - within normal operating range
         # Joint order: left_swing, left_shrug, right_swing, right_shrug
 
-        # Swing joints: moderate range, not extreme
-        qpos[7] = self.np_random.uniform(-0.5, 0.5)  # left swing: ±29 degrees
-        qpos[9] = self.np_random.uniform(-0.5, 0.5)  # right swing: ±29 degrees
+        # Swing joints: Start with arms in front of body (approx 30-85 degrees)
+        qpos[7] = self.np_random.uniform(0.5, 1.5)  # left swing: ~30-85 degrees
+        qpos[9] = self.np_random.uniform(0.5, 1.5)  # right swing: ~30-85 degrees
 
         # Shrug joints: small variation around neutral
         qpos[8] = self.np_random.uniform(-0.01, 0.01)  # left shrug: ±1cm

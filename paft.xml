@@ -18,8 +18,8 @@
         <!-- defaults for simple primitive geoms -->
         <geom type="box" density="500" rgba="0.7 0.7 0.7 1" solref="0.002 1" solimp="0.99 0.999 0.001"/>
         <joint type="hinge" limited="true" axis="0 1 0" damping="2.0" frictionloss="0.08" armature="0.005"/>
-        <!-- position servo defaults (PD) - reduced kp for slower acceleration -->
-        <position kp="40" kv="10"/>
+        <!-- position servo defaults (PD) - reduced kp and increased kv for slower motion -->
+        <position kp="30" kv="15"/>
     </default>
     <!-- no mesh assets needed; using primitive boxes -->
     <worldbody>
@@ -54,7 +54,7 @@
                 <!-- Nested body for shrug mechanism -->
                 <body name="left_arm_segment" pos="0 0 0">
                     <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
-                    <joint name="left_shrug" type="slide" axis="0 0 1" limited="true" range="-0.015 0.015"/>
+                    <joint name="left_shrug" type="slide" axis="0 0 1" limited="true" range="-0.005 0.005"/>
                     <!-- Explicit inertial: mass concentrated at bottom of arm -->
                     <!-- Arm: 53.5mm × 54mm × 480mm = 0.0535 × 0.054 × 0.48m, mass=1.5kg -->
                     <!-- I_x = I_y = m/12 × (y² + z²) = 1.5/12 × (0.054² + 0.48²) = 0.0289 -->
@@ -75,7 +75,7 @@
                 <!-- Nested body for shrug mechanism -->
                 <body name="right_arm_segment" pos="0 0 0">
                     <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
-                    <joint name="right_shrug" type="slide" axis="0 0 1" limited="true" range="-0.015 0.015"/>
+                    <joint name="right_shrug" type="slide" axis="0 0 1" limited="true" range="-0.005 0.005"/>
                     <!-- Explicit inertial: mass concentrated at bottom of arm -->
                     <!-- Arm: 53.5mm × 54mm × 480mm = 0.0535 × 0.054 × 0.48m, mass=1.5kg -->
                     <!-- I_x = I_y = m/12 × (y² + z²) = 1.5/12 × (0.054² + 0.48²) = 0.0289 -->
@@ -97,13 +97,13 @@
     <actuator>
         <!-- Left arm actuators -->
         <!-- Swing: Position servo (PWM controlled) -->
-        <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-15 15"/>
+        <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-10 10"/>
         <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
         <motor name="left_shrug_motor" joint="left_shrug" ctrllimited="true" ctrlrange="-50 50" gear="1"/>
         
         <!-- Right arm actuators -->
         <!-- Swing: Position servo (PWM controlled) -->
-        <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-15 15"/>
+        <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-10 10"/>
         <!-- Shrug: Motor (linear actuator - direct force control for slide joint) -->
         <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-50 50" gear="1"/>
     </actuator>
