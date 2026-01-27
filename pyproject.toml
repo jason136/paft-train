@@ -1,17 +1,12 @@
 [project]
 name = "paft-train"
 version = "0.1.0"
-description = "Add your description here"
+description = "PAFT robot locomotion training with PPO"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
-    "tensordict>=0.10.0",
-    "torchrl>=0.10.0",
-    "gymnasium[mujoco]>=0.29.0",
-    "pygame>=2.1.0",
-    "torchvision>=0.23.0",
-    "av>=15.1.0",
-    "onnxruntime-extensions>=0.14.0",
-    "pip>=25.2",
-    "transformers>=4.57.0",
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "gymnasium[mujoco,other]>=0.29.0",
+    "trackio>=0.3.0",
 ]
