@@ -9,4 +9,6 @@ dependencies = [
     "numpy>=1.24.0",
     "gymnasium[mujoco,other]>=0.29.0",
     "trackio>=0.3.0",
+    "torchrl>=0.4.0",
+    "tensordict>=0.4.0",
 ]

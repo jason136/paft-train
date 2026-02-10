@@ -17,13 +17,13 @@
     <default>
         <!-- defaults for simple primitive geoms -->
         <geom type="box" density="500" rgba="0.7 0.7 0.7 1" solref="0.002 1" solimp="0.99 0.999 0.001"/>
-        <joint type="hinge" limited="true" axis="0 1 0" damping="2.0" frictionloss="0.08" armature="0.005"/>
+        <joint type="hinge" limited="true" axis="0 1 0" damping="4.0" frictionloss="0.2" armature="0.0025"/>
         <!-- position servo defaults (PD) - reduced kp and increased kv for slower motion -->
         <position kp="30" kv="15"/>
         
         <!-- Separate defaults for slow linear slide joints -->
         <default class="linear_slide">
-            <joint type="slide" damping="50.0" frictionloss="5.0" armature="0.1"/>
+            <joint type="slide" damping="20.0" frictionloss="2.0" armature="0.1"/>
         </default>
     </default>
     <!-- no mesh assets needed; using primitive boxes -->
@@ -59,7 +59,7 @@
                 <!-- Nested body for shrug mechanism -->
                 <body name="left_arm_segment" pos="0 0 0">
                     <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
-                    <joint name="left_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.005 0.005"/>
+                    <joint name="left_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.02 0.02"/>
                     <!-- Explicit inertial: mass concentrated at bottom of arm -->
                     <!-- Arm: 53.5mm × 54mm × 480mm = 0.0535 × 0.054 × 0.48m, mass=1.5kg -->
                     <!-- I_x = I_y = m/12 × (y² + z²) = 1.5/12 × (0.054² + 0.48²) = 0.0289 -->
@@ -80,7 +80,7 @@
                 <!-- Nested body for shrug mechanism -->
                 <body name="right_arm_segment" pos="0 0 0">
                     <!-- Shrug joint: LINEAR slide up/down along Z axis (linear actuator controlled) -->
-                    <joint name="right_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.005 0.005"/>
+                    <joint name="right_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.02 0.02"/>
                     <!-- Explicit inertial: mass concentrated at bottom of arm -->
                     <!-- Arm: 53.5mm × 54mm × 480mm = 0.0535 × 0.054 × 0.48m, mass=1.5kg -->
                     <!-- I_x = I_y = m/12 × (y² + z²) = 1.5/12 × (0.054² + 0.48²) = 0.0289 -->
@@ -104,24 +104,18 @@
         <!-- Swing: Position servo (PWM controlled) -->
         <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-10 10"/>
         <!-- Shrug: Motor (linear actuator - SLOW with reduced force) -->
-        <motor name="left_shrug_motor" joint="left_shrug" ctrllimited="true" ctrlrange="-20 20" gear="1"/>
+        <motor name="left_shrug_motor" joint="left_shrug" ctrllimited="true" ctrlrange="-50 50" gear="1"/>
         
         <!-- Right arm actuators -->
         <!-- Swing: Position servo (PWM controlled) -->
         <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-10 10"/>
         <!-- Shrug: Motor (linear actuator - SLOW with reduced force) -->
-        <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-20 20" gear="1"/>
+        <motor name="right_shrug_motor" joint="right_shrug" ctrllimited="true" ctrlrange="-50 50" gear="1"/>
     </actuator>
 
     <sensor>
-        <!-- IMU sensors: gyroscope and accelerometer at body center -->
-        <gyro name="body_gyro" site="imu_site"/>
-        <accelerometer name="body_accel" site="imu_site"/>
-        
-        <!-- Joint position encoders: automatically handle linear vs rotational -->
-        <jointpos name="left_shoulder_encoder" joint="left_shrug"/>    <!-- Linear position (meters) -->
-        <jointpos name="right_shoulder_encoder" joint="right_shrug"/>  <!-- Linear position (meters) -->
-        <jointpos name="left_arm_encoder" joint="left_swing"/>         <!-- Angular position (radians) -->
-        <jointpos name="right_arm_encoder" joint="right_swing"/>       <!-- Angular position (radians) -->
+        <!-- IMU sensors only (no joint encoders on real hardware) -->
+        <gyro name="body_gyro" site="imu_site"/>           <!-- 3: angular velocity -->
+        <accelerometer name="body_accel" site="imu_site"/>  <!-- 3: linear acceleration -->
     </sensor>
 </mujoco>

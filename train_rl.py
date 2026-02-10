@@ -198,7 +198,7 @@ def record_video(agent: ActorCritic, obs_rms: RunningMeanStd, tag: str):
         with torch.no_grad():
             action = agent.actor(torch.from_numpy(obs_norm).unsqueeze(0))
         action = action.squeeze().numpy()
-        action = np.tanh(action)  # Bound to [-1, 1]
+        action = np.clip(action, -1.0, 1.0)  # Match training: clip, not tanh
 
         obs, reward, terminated, truncated, _ = env.step(action)
         total_reward += reward
@@ -311,12 +311,11 @@ def train():
         lastgae = 0
         for t in reversed(range(STEPS_PER_ENV)):
             if t == STEPS_PER_ENV - 1:
-                next_nonterminal = 1.0 - done_buf[t]
                 next_values = next_value
             else:
-                next_nonterminal = 1.0 - done_buf[t + 1]
                 next_values = val_buf[t + 1]
 
+            next_nonterminal = 1.0 - done_buf[t]
             delta = rew_buf[t] + GAMMA * next_values * next_nonterminal - val_buf[t]
             advantages[t] = lastgae = (
                 delta + GAMMA * GAE_LAMBDA * next_nonterminal * lastgae
