@@ -48,17 +48,18 @@ LR = 1e-4
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_EPSILON = 0.2
-ENTROPY_COEFF = 0.1
+ENTROPY_COEFF = 0.05
 CRITIC_COEFF = 0.25
 MAX_GRAD_NORM = 0.5
 
 HIDDEN_SIZE = 256
-MIN_SCALE = 0.5
+MIN_SCALE = 0.2
 LR_DECAY_POWER = 3  # power curve exponent: higher = stays high longer
 
 LOG_INTERVAL = 12
 VIDEO_INTERVAL = 24
 EVAL_INTERVAL = 6
+CHECKPOINT_INTERVAL = 240
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +173,7 @@ def record_video(
         episode_trigger=lambda _: True,
     )
     obs, total_reward = raw_env.reset()[0], 0.0
+    gait_rewards, fwd_vels, swing_errors = [], [], []
 
     with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
         for _ in range(10000):
@@ -183,13 +185,22 @@ def record_video(
                 .squeeze(0)
                 .numpy()
             )
-            obs, reward, term, trunc, _ = raw_env.step(action)
+            obs, reward, term, trunc, info = raw_env.step(action)
             total_reward += reward
+            gait_rewards.append(info.get("gait_reward", 0))
+            fwd_vels.append(info.get("forward_vel", 0))
+            swing_errors.append(info.get("swing_error", 0))
             if term or trunc:
                 break
 
     raw_env.close()
-    print(f"  Video: {tag} | Reward: {total_reward:.1f}")
+    n = len(gait_rewards)
+    print(
+        f"  Video: {tag} | R: {total_reward:.1f} | Steps: {n} | "
+        f"Gait: {np.mean(gait_rewards):.3f} | "
+        f"SwingErr: {np.mean(swing_errors):.3f}rad | "
+        f"FwdVel: {np.sum(fwd_vels):.3f}m"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,7 +257,9 @@ def train():
     )
     optimizer = torch.optim.Adam(loss_module.parameters(), lr=LR, eps=1e-5)
     num_batches = TOTAL_FRAMES // FRAMES_PER_BATCH
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, TOTAL_FRAMES, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, num_batches, eta_min=1e-6
+    )
 
     # Training loop
     logs, best_eval_reward = defaultdict(list), float("-inf")
@@ -320,6 +333,21 @@ def train():
                 policy, obs_loc.numpy(), obs_scale.numpy(), f"batch_{batch_idx+1}"
             )
 
+        if (batch_idx + 1) % CHECKPOINT_INTERVAL == 0:
+            ckpt_path = f"./checkpoints/batch_{batch_idx+1}.pt"
+            os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+            torch.save(
+                {
+                    "policy": policy.state_dict(),
+                    "value": value.state_dict(),
+                    "obs_loc": env.transform[0].loc.clone(),
+                    "obs_scale": env.transform[0].scale.clone(),
+                    "batch_idx": batch_idx + 1,
+                },
+                ckpt_path,
+            )
+            print(f"  Checkpoint saved: {ckpt_path}")
+
     # Cleanup and final eval
     obs_loc, obs_scale = env.transform[0].loc.clone(), env.transform[0].scale.clone()
     collector.shutdown()
@@ -347,7 +375,6 @@ def train():
     print(f"Saved: {CHECKPOINT_PATH}")
 
     final_env.close()
-    env.close()
     eval_env.close()
 
     trackio.finish()
