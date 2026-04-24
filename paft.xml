@@ -13,10 +13,11 @@
     <default>
         <geom type="box" density="500" rgba="0.7 0.7 0.7 1" solref="0.002 1" solimp="0.99 0.999 0.001"/>
         <joint type="hinge" limited="true" axis="0 1 0" damping="4.0" frictionloss="0.2" armature="0.0025"/>
-        <position kp="80" kv="10"/>
+        <position kp="50" kv="12"/>
 
         <default class="linear_slide">
-            <joint type="slide" damping="10.0" frictionloss="0.5" armature="0.1"/>
+            <!-- JQDML: ~5mm/s at typical operating force -->
+            <joint type="slide" damping="3000.0" frictionloss="2.0" armature="0.5"/>
         </default>
     </default>
 
@@ -26,37 +27,37 @@
         <geom type="plane" size="5 5 0.1" rgba="0.9 0.9 0.9 1" friction="5.0 1.0 0.005"/>
 
         <!-- TARS body: 480mm tall, 214mm wide (arms + body), 54mm deep -->
-        <!-- Body is 107mm wide (half of total), each arm is 53.5mm (quarter of total) -->
         <body name="tars" pos="0 0 0.24">
             <joint type="free" damping="0"/>
-            <!-- Torso: 1.5kg (40% of 3.75kg), COM at geometric center -->
-            <inertial pos="0 0 0" mass="1.5" diaginertia="0.029 0.030 0.002"/>
+            <!-- Torso: 1.0kg, COM at geometric center -->
+            <inertial pos="0 0 0" mass="1.0" diaginertia="0.019 0.020 0.001"/>
             <geom name="body_center" size="0.0535 0.027 0.24" rgba="0.7 0.7 0.7 1" friction="5.0 1.0 0.005"/>
-            <!-- Black screen on front face -->
             <geom name="front_screen" type="box" size="0.0535 0.0002 0.03" pos="0 0.0271 0.144" rgba="0.05 0.05 0.05 1" contype="0" conaffinity="0" mass="0" group="1"/>
             <site name="imu_site" pos="0 0 0" size="0.01"/>
 
-            <!-- Left arm: swing (hinge) + shrug (linear slide) -->
-            <!-- Pivot at 358.5mm above ground, 0.1185m above body center -->
+            <!-- Left arm: MG996R swing servo + linear shrug -->
             <body name="left_arm" pos="-0.0535 0 0.1185">
-                <joint name="left_swing" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265" damping="0.5" armature="0.05"/>
+                <!-- MG996R: 11 kg·cm stall, 0.14s/60°, 180° range -->
+                <joint name="left_swing" type="hinge" axis="1 0 0" limited="true" range="-1.5708 1.5708" damping="0.15" armature="0.01"/>
                 <inertial pos="0 0 0" mass="0.02" diaginertia="0.0001 0.0001 0.0001"/>
                 <body name="left_arm_segment" pos="0 0 0">
-                    <joint name="left_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.02 0.02"/>
-                    <!-- Arm: 1.105kg (29% of 3.75kg), COM at arm center 0.1185m below pivot -->
-                    <inertial pos="-0.02675 0 -0.1185" mass="1.105" diaginertia="0.0215 0.0215 0.00053"/>
+                    <!-- JQDML 10mm stroke, 188N max, 5mm/s -->
+                    <joint name="left_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.005 0.005"/>
+                        <!-- Arm: 0.7kg, COM at arm center 0.1185m below pivot -->
+                    <inertial pos="-0.02675 0 -0.1185" mass="0.7" diaginertia="0.0136 0.0136 0.00034"/>
                     <geom name="left_arm_geom" size="0.02675 0.027 0.24" pos="-0.02675 0 -0.1185" rgba="0.7 0.7 0.7 1" friction="5.0 1.0 0.005"/>
                 </body>
             </body>
 
-            <!-- Right arm: swing (hinge) + shrug (linear slide) -->
+            <!-- Right arm: MG996R swing servo + linear shrug -->
             <body name="right_arm" pos="0.0535 0 0.1185">
-                <joint name="right_swing" type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265" damping="0.5" armature="0.05"/>
+                <joint name="right_swing" type="hinge" axis="1 0 0" limited="true" range="-1.5708 1.5708" damping="0.15" armature="0.01"/>
                 <inertial pos="0 0 0" mass="0.02" diaginertia="0.0001 0.0001 0.0001"/>
                 <body name="right_arm_segment" pos="0 0 0">
-                    <joint name="right_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.02 0.02"/>
-                    <!-- Arm: 1.105kg (29% of 3.75kg), COM at arm center 0.1185m below pivot -->
-                    <inertial pos="0.02675 0 -0.1185" mass="1.105" diaginertia="0.0215 0.0215 0.00053"/>
+                    <!-- JQDML 10mm stroke, 188N max, 5mm/s -->
+                    <joint name="right_shrug" class="linear_slide" axis="0 0 1" limited="true" range="-0.005 0.005"/>
+                        <!-- Arm: 0.7kg, COM at arm center 0.1185m below pivot -->
+                    <inertial pos="0.02675 0 -0.1185" mass="0.7" diaginertia="0.0136 0.0136 0.00034"/>
                     <geom name="right_arm_geom" size="0.02675 0.027 0.24" pos="0.02675 0 -0.1185" rgba="0.7 0.7 0.7 1" friction="5.0 1.0 0.005"/>
                 </body>
             </body>
@@ -67,13 +68,14 @@
     </worldbody>
 
     <actuator>
-        <!-- Swing servos: kp=50 kv=12 from defaults, torque ±30 Nm for heavier arms -->
-        <position name="left_swing_servo" joint="left_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-50 50"/>
-        <position name="left_shrug_servo" joint="left_shrug" kp="1500" kv="100" ctrllimited="true" ctrlrange="-0.02 0.02" forcerange="-40 40"/>
+        <!-- MG996R swing servos: 1.1 Nm stall torque (11 kg·cm at 6V) -->
+        <position name="left_swing_servo" joint="left_swing" kp="15" kv="1.5" ctrllimited="true" ctrlrange="-1.5708 1.5708" forcerange="-1.1 1.1"/>
+        <!-- JQDML linear actuator: 188N max, 5mm/s, 10mm stroke -->
+        <position name="left_shrug_servo" joint="left_shrug" kp="5000" kv="500" ctrllimited="true" ctrlrange="-0.005 0.005" forcerange="-188 188"/>
 
-        <!-- Right arm actuators (symmetric) -->
-        <position name="right_swing_servo" joint="right_swing" ctrllimited="true" ctrlrange="-3.14159265 3.14159265" forcerange="-50 50"/>
-        <position name="right_shrug_servo" joint="right_shrug" kp="1500" kv="100" ctrllimited="true" ctrlrange="-0.02 0.02" forcerange="-40 40"/>
+        <!-- Right arm (symmetric) -->
+        <position name="right_swing_servo" joint="right_swing" kp="15" kv="1.5" ctrllimited="true" ctrlrange="-1.5708 1.5708" forcerange="-1.1 1.1"/>
+        <position name="right_shrug_servo" joint="right_shrug" kp="5000" kv="500" ctrllimited="true" ctrlrange="-0.005 0.005" forcerange="-188 188"/>
     </actuator>
 
     <sensor>

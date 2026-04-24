@@ -24,10 +24,19 @@ class PaftEnv(MujocoEnv, EzPickle):
     NUM_JOINT_POS = 4  # actual joint positions (swing×2 + shrug×2)
     NUM_JOINT_VEL = 4  # actual joint velocities
 
-    GAIT_FREQ = 0.15  # Hz — 6.7s cycle, slow enough for gravity on both halves
-    SWING_AMPLITUDE = 0.70  # radians (~40°) — arms reach far out to tip body
-    SHRUG_AMPLITUDE = 0.020  # meters (20mm) — full actuator range
-    PITCH_AMPLITUDE = 0.10  # radians (~5.7°) — body rock follows arm reach
+    SWING_AMPLITUDE = 0.70  # radians (~40°)
+    SHRUG_AMPLITUDE = 0.005  # meters (5mm) — JQDML 10mm stroke centered
+
+    # 4-phase self-paced gait: two symmetric halves (arms, then body)
+    SHRUG_UP_THRESH = 0.00375  # m — 75% of shrug amplitude
+    REACH_THRESH = 0.525  # rad — 75% of swing amplitude
+    SHRUG_DOWN_THRESH = -0.00375  # m — 75% of shrug amplitude
+    BODY_FWD_THRESH = -0.525  # rad — symmetric with REACH_THRESH
+    NEUTRAL_SW_THRESH = 0.12  # rad — swing "neutral"
+    NEUTRAL_SH_THRESH = 0.002  # m — shrug "neutral"
+
+    PHASE_REWARD = 5.0  # per phase transition
+    CYCLE_REWARD = 25.0  # full cycle completion bonus
 
     def __init__(
         self,
@@ -56,9 +65,12 @@ class PaftEnv(MujocoEnv, EzPickle):
         self.action_space = spaces.Box(
             -1.0, 1.0, shape=(self.NUM_MOTORS,), dtype=np.float32
         )
-        self._action_scale = np.array([1.0, 0.02, 1.0, 0.02], dtype=np.float32)
+        self._action_scale = np.array([1.5708, 0.005, 1.5708, 0.005], dtype=np.float32)
 
-        self._gait_phase = 0.0  # [0, 1) — wraps every cycle
+        self._gait_stage = 0  # 0=IDLE, 1=REACHED, 2=PULLED
+        self._steps_completed = 0
+        self._peak_swing = 0.0
+        self._peak_shrug = 0.0
         self._last_action = np.zeros(self.NUM_MOTORS, dtype=np.float32)
         self._prev_action = np.zeros(self.NUM_MOTORS, dtype=np.float32)
 
@@ -76,62 +88,86 @@ class PaftEnv(MujocoEnv, EzPickle):
         self._target_heading = 0.0
         self._step_count = 0
 
-    def _gait_targets(self, phase: float) -> Tuple[float, float, float]:
-        """Piecewise gait waveform: lift → reach → tilt → pull → push → recover.
+    def _check_gait_progress(self, avg_swing: float, avg_shrug: float) -> float:
+        """4-phase self-paced gait with normalized shaping.
 
-        Returns (swing_target, shrug_target, pitch_target).
+        Shaping scales are set so reaching full amplitude on either axis
+        produces exactly PHASE_REWARD of shaping reward. No multipliers.
 
-        Shoulders UP lifts arms off ground. Arms swing forward in air.
-        Gravity tilts body forward, arms contact ground. Shoulders
-        equalize while body pulls forward. Shoulders push DOWN to
-        lift body off floor. Body swings forward and lands. Recover.
-
-        Cycle phases (fraction of period):
-          0.00–0.05  LIFT: shrug 0 → +S                  (shoulders up, clear ground)
-          0.05–0.15  REACH: swing 0 → +A, shrug +S       (arms forward in air)
-          0.15–0.33  HOLD: swing +A, shrug +S              (wait for gravity tilt)
-          0.33–0.71  PULL: swing +A → 0, shrug +S → -S    (shoulders settle past
-                                                           neutral as body follows)
-          0.71–0.77  PUSH: swing 0 → -A, shrug -S         (arms back, body lifts)
-          0.77–0.87  HOLD2: hold -A, shrug -S              (wait for body swing fwd)
-          0.87–0.95  RECOVER: swing -A → 0, shrug -S → 0  (arms fwd, equalize)
-          0.95–1.00  SETTLE: swing 0, shrug 0              (prep next cycle)
+        0 FORWARD:  shrug up + swing forward
+        1 SETTLE:   return to neutral
+        2 BACKWARD: shrug down + swing back
+        3 RECOVER:  return to neutral (cycle complete)
         """
-        A = self.SWING_AMPLITUDE
-        S = self.SHRUG_AMPLITUDE
+        reward = 0.0
+        sw_scale = self.PHASE_REWARD / self.SWING_AMPLITUDE
+        sh_scale = self.PHASE_REWARD / self.SHRUG_AMPLITUDE
+        settle_scale = self.PHASE_REWARD / (self.SWING_AMPLITUDE + 1.0)
 
-        if phase < 0.05:
-            frac = phase / 0.05
-            swing = 0.0
-            shrug = S * frac
-        elif phase < 0.15:
-            frac = (phase - 0.05) / 0.10
-            swing = A * frac
-            shrug = S
-        elif phase < 0.33:
-            swing = A
-            shrug = S
-        elif phase < 0.71:
-            frac = (phase - 0.33) / 0.38
-            swing = A * (1.0 - frac)
-            shrug = S * (1.0 - 2.0 * frac)
-        elif phase < 0.77:
-            frac = (phase - 0.71) / 0.06
-            swing = -A * frac
-            shrug = -S
-        elif phase < 0.87:
-            swing = -A
-            shrug = -S
-        elif phase < 0.95:
-            frac = (phase - 0.87) / 0.08
-            swing = -A * (1.0 - frac)
-            shrug = -S * (1.0 - frac)
-        else:
-            swing = 0.0
-            shrug = 0.0
+        if self._gait_stage == 0:  # FORWARD
+            new_sh = max(self._peak_shrug, avg_shrug)
+            new_sw = max(self._peak_swing, avg_swing)
+            reward += (new_sh - self._peak_shrug) * sh_scale
+            reward += (new_sw - self._peak_swing) * sw_scale
+            self._peak_shrug = new_sh
+            self._peak_swing = new_sw
+            reached = avg_swing > self.REACH_THRESH
+            lifted = avg_shrug > self.SHRUG_UP_THRESH
+            if reached or lifted:
+                bonus = 1.0 + (1.0 if reached else 0.0) + (1.0 if lifted else 0.0)
+                reward += self.PHASE_REWARD * bonus
+                self._gait_stage = 1
+                self._peak_swing = 0.0
+                self._peak_shrug = 0.0
 
-        pitch = self.PITCH_AMPLITUDE * (swing / A) if A > 0 else 0.0
-        return swing, shrug, pitch
+        elif self._gait_stage == 1:  # SETTLE
+            curr_dist = abs(avg_swing) + abs(avg_shrug) * (
+                self.SWING_AMPLITUDE / self.SHRUG_AMPLITUDE
+            )
+            if self._peak_swing == 0.0:
+                self._peak_swing = curr_dist
+            if curr_dist < self._peak_swing:
+                reward += (self._peak_swing - curr_dist) * settle_scale
+                self._peak_swing = curr_dist
+            if abs(avg_swing) < self.NEUTRAL_SW_THRESH and abs(avg_shrug) < self.NEUTRAL_SH_THRESH:
+                reward += self.PHASE_REWARD
+                self._gait_stage = 2
+                self._peak_swing = 0.0
+                self._peak_shrug = 0.0
+
+        elif self._gait_stage == 2:  # BACKWARD
+            new_sh = min(self._peak_shrug, avg_shrug)
+            new_sw = min(self._peak_swing, avg_swing)
+            reward += (self._peak_shrug - new_sh) * sh_scale
+            reward += (self._peak_swing - new_sw) * sw_scale
+            self._peak_shrug = new_sh
+            self._peak_swing = new_sw
+            body_fwd = avg_swing < self.BODY_FWD_THRESH
+            pushed = avg_shrug < self.SHRUG_DOWN_THRESH
+            if body_fwd or pushed:
+                bonus = 1.0 + (1.0 if body_fwd else 0.0) + (1.0 if pushed else 0.0)
+                reward += self.PHASE_REWARD * bonus
+                self._gait_stage = 3
+                self._peak_swing = 0.0
+                self._peak_shrug = 0.0
+
+        elif self._gait_stage == 3:  # RECOVER
+            curr_dist = abs(avg_swing) + abs(avg_shrug) * (
+                self.SWING_AMPLITUDE / self.SHRUG_AMPLITUDE
+            )
+            if self._peak_swing == 0.0:
+                self._peak_swing = curr_dist
+            if curr_dist < self._peak_swing:
+                reward += (self._peak_swing - curr_dist) * settle_scale
+                self._peak_swing = curr_dist
+            if abs(avg_swing) < self.NEUTRAL_SW_THRESH and abs(avg_shrug) < self.NEUTRAL_SH_THRESH:
+                self._gait_stage = 0
+                self._steps_completed += 1
+                self._peak_swing = 0.0
+                self._peak_shrug = 0.0
+                reward += self.CYCLE_REWARD
+
+        return reward
 
     def _get_obs(self) -> np.ndarray:
         """IMU + heading + phase + joint state + action history."""
@@ -164,10 +200,11 @@ class PaftEnv(MujocoEnv, EzPickle):
         )
         local_dir = (R @ world_dir)[:2]
 
+        stage_phase = self._gait_stage / 4.0
         phase_signal = np.array(
             [
-                np.sin(2 * np.pi * self._gait_phase),
-                np.cos(2 * np.pi * self._gait_phase),
+                np.sin(2 * np.pi * stage_phase),
+                np.cos(2 * np.pi * stage_phase),
             ],
             dtype=np.float32,
         )
@@ -182,10 +219,6 @@ class PaftEnv(MujocoEnv, EzPickle):
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         action = np.clip(action, -1.0, 1.0)
 
-        # Advance gait phase clock at fixed frequency
-        dt = self.frame_skip * self.model.opt.timestep
-        self._gait_phase = (self._gait_phase + self.GAIT_FREQ * dt) % 1.0
-
         self._prev_action = self._last_action.copy()
         self._last_action = action.copy()
 
@@ -198,109 +231,113 @@ class PaftEnv(MujocoEnv, EzPickle):
         qw, qx, qy, qz = self.data.qpos[3:7]
 
         # === REWARD ===
-        # 1. Forward velocity toward target
         velocity = np.array([x_after - x_before, y_after - y_before])
         target_dir = np.array(
             [np.cos(self._target_heading), np.sin(self._target_heading)]
         )
         forward_vel = np.dot(velocity, target_dir)
 
-        # 2. Heading alignment (face the target direction)
-        yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy**2 + qz**2))
-        heading_error = np.abs(
-            np.arctan2(
-                np.sin(yaw - self._target_heading), np.cos(yaw - self._target_heading)
-            )
-        )
-        alignment = np.cos(heading_error)  # 1 when aligned, -1 when opposite
+        r_velocity = forward_vel * 200.0
 
-        # 3. Gait tracking — loose guidance on timing, not exact trajectories.
-        #    Low k values let the policy deviate from the waveform while
-        #    still rewarding being in the right part of the cycle.
-        swing_target, shrug_target, _pitch_target = self._gait_targets(
-            self._gait_phase
-        )
+        avg_swing = 0.5 * (self.data.qpos[7] + self.data.qpos[9])
+        avg_shrug = 0.5 * (self.data.qpos[8] + self.data.qpos[10])
+        r_gait = self._check_gait_progress(avg_swing, avg_shrug)
 
-        left_swing = self.data.qpos[7]
-        left_shrug = self.data.qpos[8]
-        right_swing = self.data.qpos[9]
-        right_shrug = self.data.qpos[10]
+        r_survive = -0.05
 
-        # exp(-k * err²): k=5 means error of ~0.45 rad still gets 37% credit
-        k_swing = 5.0
-        k_shrug = 5.0 / (self.SHRUG_AMPLITUDE ** 2)  # normalized: full-range error → 37%
-
-        gait_reward = (
-            np.exp(-k_swing * (left_swing - swing_target) ** 2)
-            + np.exp(-k_swing * (right_swing - swing_target) ** 2)
-            + np.exp(-k_shrug * (left_shrug - shrug_target) ** 2)
-            + np.exp(-k_shrug * (right_shrug - shrug_target) ** 2)
-        )
-
-        action_rate = np.sum((action - self._prev_action) ** 2)
-
-        # Multiplicative gait: amplifies velocity reward when roughly
-        # following the phase. 4 components → bonus range [1.0, 3.0]
-        gait_bonus = 1.0 + gait_reward * 0.5
-
-        reward = (
-            forward_vel * 500.0 * gait_bonus  # velocity × gait quality
-            + alignment * 0.05  # face the target
-            - action_rate * 0.05  # smooth control
-        )
+        reward = r_velocity + r_gait + r_survive
 
         # === TERMINATION ===
         up_z = 1 - 2 * (qx**2 + qy**2)
         tilt_angle = np.arccos(np.clip(up_z, -1, 1))
-        terminated = bool(tilt_angle > np.radians(60))  # 60° tilt = fall
+        terminated = bool(tilt_angle > np.radians(60))
 
-        # Penalty for falling — prevents "fall early to stop the bleeding"
         if terminated:
             reward -= 10.0
 
         self._update_arrow()
 
         info = {
-            "forward_vel": forward_vel,
-            "gait_reward": gait_reward,
-            "swing_error": 0.5
-            * (abs(left_swing - swing_target) + abs(right_swing - swing_target)),
-            "shrug_error": 0.5
-            * (abs(left_shrug - shrug_target) + abs(right_shrug - shrug_target)),
-            "gait_phase": self._gait_phase,
+            "r_velocity": r_velocity,
+            "r_gait": r_gait,
+            "r_survive": r_survive,
+            "gait_stage": self._gait_stage,
+            "steps_completed": self._steps_completed,
         }
         return self._get_obs(), reward, terminated, False, info
+
+    def set_start_stage(self, stage: int, deterministic: bool = False) -> None:
+        """Force a specific starting stage for the next reset."""
+        self._forced_stage = stage
+        self._deterministic_reset = deterministic
 
     def reset_model(self) -> np.ndarray:
         self._step_count = 0
         self._last_action = np.zeros(self.NUM_MOTORS, dtype=np.float32)
         self._prev_action = np.zeros(self.NUM_MOTORS, dtype=np.float32)
-        self._gait_phase = 0.0
-
-        # Light domain randomization
-        if hasattr(self, "_base_masses"):
-            self.model.body_mass[:] = self._base_masses * self.np_random.uniform(
-                0.95, 1.05
-            )
-        else:
-            self._base_masses = self.model.body_mass.copy()
+        self._steps_completed = 0
+        self._peak_swing = 0.0
+        self._peak_shrug = 0.0
 
         qpos = self.init_qpos.copy()
         qvel = self.init_qvel.copy()
 
-        # Fixed heading for Phase 1 — learn to walk forward first,
-        # add heading randomization later once walking is reliable
         self._target_heading = 0.0
 
-        qpos[0] += self.np_random.uniform(-0.05, 0.05)
-        qpos[1] += self.np_random.uniform(-0.05, 0.05)
+        deterministic = getattr(self, "_deterministic_reset", False)
+        if deterministic:
+            self._deterministic_reset = False
+        else:
+            qpos[0] += self.np_random.uniform(-0.05, 0.05)
+            qpos[1] += self.np_random.uniform(-0.05, 0.05)
 
-        # Face the target: robot forward is +Y, heading 0 is +X, so yaw = -π/2
-        yaw = -np.pi / 2 + self.np_random.uniform(-0.1, 0.1)
-        qpos[3], qpos[6] = np.cos(yaw / 2), np.sin(yaw / 2)
+        if hasattr(self, "_forced_stage") and self._forced_stage is not None:
+            stage = self._forced_stage
+            self._forced_stage = None
+        else:
+            stage = int(self.np_random.integers(0, 4))
+        self._gait_stage = stage
 
-        # Arms in consistent neutral position
-        qpos[7] = qpos[9] = 0.0
+        yaw = -np.pi / 2
+        if not deterministic:
+            yaw += self.np_random.uniform(-0.1, 0.1)
+
+        if stage == 0:
+            qpos[7] = qpos[9] = 0.0
+            qpos[8] = qpos[10] = 0.0
+        elif stage == 1:
+            # Arms in air: randomize swing and shrug (the airborne part)
+            sw_noise = self.np_random.normal(0, self.SWING_AMPLITUDE * 0.10, size=2)
+            sh_noise = self.np_random.normal(0, self.SHRUG_AMPLITUDE * 0.15, size=2)
+            qpos[7] = self.SWING_AMPLITUDE + sw_noise[0]
+            qpos[9] = self.SWING_AMPLITUDE + sw_noise[1]
+            # Shrug must stay positive (arms in air, not clipping ground)
+            qpos[8] = max(0.002, self.SHRUG_AMPLITUDE + sh_noise[0])
+            qpos[10] = max(0.002, self.SHRUG_AMPLITUDE + sh_noise[1])
+        elif stage == 2:
+            qpos[7] = qpos[9] = 0.0
+            qpos[8] = qpos[10] = 0.0
+        elif stage == 3:
+            # Body tilted forward, arms vertical and planted, resting on arms.
+            # Compute body z so arm tips sit exactly at ground level:
+            #   pivot_z = body_z + 0.1185 * cos(pitch)
+            #   arm_bottom_z = pivot_z + shrug - 0.3585 = 0
+            #   body_z = 0.3585 - shrug - 0.1185 * cos(pitch)
+            pitch_noise = self.np_random.normal(0, self.SWING_AMPLITUDE * 0.10)
+            pitch = max(0.15, self.SWING_AMPLITUDE + pitch_noise)
+            shrug_val = -self.SHRUG_AMPLITUDE
+            qpos[7] = qpos[9] = -pitch  # counter-rotate arms to stay vertical
+            qpos[8] = qpos[10] = shrug_val
+            cy, sy = np.cos(yaw / 2), np.sin(yaw / 2)
+            cp, sp = np.cos(pitch / 2), np.sin(pitch / 2)
+            qpos[3] = cy * cp
+            qpos[4] = cy * sp
+            qpos[5] = sy * sp
+            qpos[6] = sy * cp
+            qpos[2] = 0.3585 - shrug_val - 0.1185 * np.cos(pitch)
+
+        if stage != 3:
+            qpos[3], qpos[6] = np.cos(yaw / 2), np.sin(yaw / 2)
 
         self.set_state(qpos, qvel)
         self._update_arrow()

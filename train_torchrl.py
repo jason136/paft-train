@@ -1,11 +1,12 @@
 import os
 from collections import defaultdict
+from functools import partial
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
-import trackio
+import wandb
 from gymnasium.wrappers import RecordVideo
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModule
@@ -38,26 +39,26 @@ SEED = 42
 CHECKPOINT_PATH = "./checkpoints/paft_torchrl.pt"
 VIDEO_DIR = "./videos/torchrl"
 
-NUM_ENVS = 10
-FRAMES_PER_BATCH = 2048
+NUM_ENVS = 50
+FRAMES_PER_BATCH = 16384
 TOTAL_FRAMES = FRAMES_PER_BATCH * 4096
-SUB_BATCH_SIZE = 128
-NUM_EPOCHS = 4
+SUB_BATCH_SIZE = 512
+NUM_EPOCHS = 3
 
 LR = 1e-4
 GAMMA = 0.99
-GAE_LAMBDA = 0.95
-CLIP_EPSILON = 0.2
+GAE_LAMBDA = 0.9
+CLIP_EPSILON = 0.1
 ENTROPY_COEFF = 0.05
 CRITIC_COEFF = 0.25
 MAX_GRAD_NORM = 0.5
 
-HIDDEN_SIZE = 256
-MIN_SCALE = 0.2
+HIDDEN_SIZE = 128
+MIN_SCALE = 0.12
 LR_DECAY_POWER = 3  # power curve exponent: higher = stays high longer
 
 LOG_INTERVAL = 12
-VIDEO_INTERVAL = 24
+VIDEO_INTERVAL = 48
 EVAL_INTERVAL = 6
 CHECKPOINT_INTERVAL = 240
 
@@ -69,7 +70,7 @@ CHECKPOINT_INTERVAL = 240
 
 def make_env(num_envs: int = 1) -> TransformedEnv:
     base = (
-        ParallelEnv(num_envs, lambda: GymEnv("Paft-v0"))
+        ParallelEnv(num_envs, partial(GymEnv, "Paft-v0"))
         if num_envs > 1
         else GymEnv("Paft-v0")
     )
@@ -146,37 +147,39 @@ def make_value(env: TransformedEnv) -> ValueOperator:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def evaluate(
-    policy: ProbabilisticActor, env: TransformedEnv, num_episodes: int = 5
+def run_policy_episode(
+    policy: ProbabilisticActor,
+    loc: np.ndarray,
+    scale: np.ndarray,
+    record_tag: str | None = None,
+    max_steps: int = 10000,
+    start_stage: int | None = None,
 ) -> dict:
-    rewards, lengths = [], []
-    with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
-        for _ in range(num_episodes):
-            rollout = env.rollout(10000, policy)
-            rewards.append(rollout["next", "reward"].sum().item())
-            lengths.append(rollout["step_count"].max().item())
-    return {
-        "eval_reward_mean": np.mean(rewards),
-        "eval_reward_std": np.std(rewards),
-        "eval_length_mean": np.mean(lengths),
-    }
+    """Run one deterministic episode in the raw Gym env."""
+    if record_tag is None:
+        env = gym.make("Paft-v0")
+    else:
+        os.makedirs(VIDEO_DIR, exist_ok=True)
+        env = RecordVideo(
+            gym.make("Paft-v0", render_mode="rgb_array"),
+            VIDEO_DIR,
+            name_prefix=record_tag,
+            episode_trigger=lambda _: True,
+        )
 
+    if start_stage is not None:
+        env.unwrapped.set_start_stage(start_stage)
 
-def record_video(
-    policy: ProbabilisticActor, loc: np.ndarray, scale: np.ndarray, tag: str
-):
-    os.makedirs(VIDEO_DIR, exist_ok=True)
-    raw_env = RecordVideo(
-        gym.make("Paft-v0", render_mode="rgb_array"),
-        VIDEO_DIR,
-        name_prefix=tag,
-        episode_trigger=lambda _: True,
-    )
-    obs, total_reward = raw_env.reset()[0], 0.0
-    gait_rewards, fwd_vels, swing_errors = [], [], []
+    obs, _ = env.reset()
+    total_reward = 0.0
+    steps_completed = 0
+    transitions = 0
+    max_stage = 0
+    prev_stage = 0
+    component_sums = defaultdict(float)
 
     with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
-        for _ in range(10000):
+        for step in range(max_steps):
             obs_t = torch.from_numpy(
                 ((obs - loc) / (scale + 1e-8)).astype(np.float32)
             ).unsqueeze(0)
@@ -185,21 +188,58 @@ def record_video(
                 .squeeze(0)
                 .numpy()
             )
-            obs, reward, term, trunc, info = raw_env.step(action)
+            obs, reward, term, trunc, info = env.step(action)
             total_reward += reward
-            gait_rewards.append(info.get("gait_reward", 0))
-            fwd_vels.append(info.get("forward_vel", 0))
-            swing_errors.append(info.get("swing_error", 0))
+            steps_completed = info.get("steps_completed", 0)
+            stage = info.get("gait_stage", 0)
+            if stage != prev_stage:
+                transitions += 1
+                prev_stage = stage
+            max_stage = max(max_stage, stage)
+            for k in ("r_velocity", "r_gait", "r_survive"):
+                component_sums[k] += info.get(k, 0.0)
             if term or trunc:
                 break
 
-    raw_env.close()
-    n = len(gait_rewards)
+    env.close()
+    n_steps = step + 1
+    result = {
+        "total_reward": total_reward,
+        "steps": n_steps,
+        "steps_completed": steps_completed,
+        "transitions": transitions,
+        "max_stage": max_stage,
+    }
+    for k, v in component_sums.items():
+        result[k] = float(v)
+    return result
+
+
+def evaluate(
+    policy: ProbabilisticActor,
+    loc: np.ndarray,
+    scale: np.ndarray,
+) -> dict:
+    episodes = [run_policy_episode(policy, loc, scale, start_stage=s) for s in range(4)]
+    result = {
+        "eval_reward_mean": np.mean([e["total_reward"] for e in episodes]),
+        "eval_reward_std": np.std([e["total_reward"] for e in episodes]),
+        "eval_length_mean": np.mean([e["steps"] for e in episodes]),
+        "eval_transitions_mean": np.mean([e["transitions"] for e in episodes]),
+    }
+    for k in ("r_velocity", "r_gait", "r_survive"):
+        result[f"eval_{k}"] = np.mean([e.get(k, 0.0) for e in episodes])
+    return result
+
+
+def record_video(
+    policy: ProbabilisticActor, loc: np.ndarray, scale: np.ndarray, tag: str
+):
+    episode = run_policy_episode(policy, loc, scale, record_tag=tag)
     print(
-        f"  Video: {tag} | R: {total_reward:.1f} | Steps: {n} | "
-        f"Gait: {np.mean(gait_rewards):.3f} | "
-        f"SwingErr: {np.mean(swing_errors):.3f}rad | "
-        f"FwdVel: {np.sum(fwd_vels):.3f}m"
+        f"  Video: {tag} | R: {episode['total_reward']:.1f} | Steps: {episode['steps']} | "
+        f"Trans: {episode['transitions']} | "
+        f"vel={episode.get('r_velocity', 0):.1f} gait={episode.get('r_gait', 0):.1f}"
     )
 
 
@@ -208,10 +248,10 @@ def record_video(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def train():
+def train(resume_path: str | None = None):
     torch.manual_seed(SEED)
     np.random.seed(SEED)
-    trackio.init(project="paft-torchrl")
+    wandb.init(project="paft-torchrl")
 
     # Initialize observation normalization with single env
     print("Initializing observation normalization...")
@@ -223,18 +263,29 @@ def train():
     )
     init_env.close()
 
-    # Create parallel training env and eval env
+    # Create parallel training env
     print(f"Creating {NUM_ENVS} parallel environments...")
-    env, eval_env = make_env(NUM_ENVS), make_env()
-    for e in (env, eval_env):
-        e.transform[0].loc, e.transform[0].scale = obs_loc.clone(), obs_scale.clone()
+    env = make_env(NUM_ENVS)
+    env.transform[0].loc, env.transform[0].scale = obs_loc.clone(), obs_scale.clone()
 
     print(
         f"Obs: {env.observation_spec['observation'].shape}, Act: {env.action_spec.shape}, Batch: {env.batch_size}"
     )
 
-    # Networks and optimizer
+    # Networks
     policy, value = make_policy(env), make_value(env)
+
+    if resume_path is not None:
+        print(f"Resuming from {resume_path} (fresh optimizer + scheduler)...")
+        ckpt = torch.load(resume_path, weights_only=False)
+        policy.load_state_dict(ckpt["policy"])
+        value.load_state_dict(ckpt["value"])
+        if "obs_loc" in ckpt:
+            obs_loc = ckpt["obs_loc"]
+            obs_scale = ckpt["obs_scale"]
+            env.transform[0].loc = obs_loc.clone()
+            env.transform[0].scale = obs_scale.clone()
+        print(f"  Loaded weights from batch {ckpt.get('batch_idx', '?')}")
     collector = Collector(
         env, policy, frames_per_batch=FRAMES_PER_BATCH, total_frames=TOTAL_FRAMES
     )
@@ -272,10 +323,10 @@ def train():
         frames = (batch_idx + 1) * FRAMES_PER_BATCH
         losses = defaultdict(list)
 
-        for _ in range(NUM_EPOCHS):
-            advantage_module(data)
-            replay_buffer.extend(data.reshape(-1).cpu())
+        advantage_module(data)
+        replay_buffer.extend(data.reshape(-1).cpu())
 
+        for _ in range(NUM_EPOCHS):
             for _ in range(FRAMES_PER_BATCH // SUB_BATCH_SIZE):
                 batch = replay_buffer.sample(SUB_BATCH_SIZE)
                 loss_vals = loss_module(batch)
@@ -297,15 +348,10 @@ def train():
         scheduler.step()
 
         # Logging
-        reward, steps = (
-            data["next", "reward"].mean().item(),
-            data["step_count"].max().item(),
-        )
+        reward = data["next", "reward"].mean().item()
         logs["reward"].append(reward)
         metrics = {
-            "frames": frames,
             "reward": reward,
-            "steps": steps,
             "pg_loss": np.mean(losses["loss_objective"]),
             "vf_loss": np.mean(losses["loss_critic"]),
             "entropy": np.mean(losses["loss_entropy"]),
@@ -313,19 +359,20 @@ def train():
         }
 
         if (batch_idx + 1) % EVAL_INTERVAL == 0:
-            eval_metrics = evaluate(policy, eval_env, num_episodes=5)
+            eval_metrics = evaluate(policy, obs_loc.numpy(), obs_scale.numpy())
             metrics.update(eval_metrics)
             logs["eval_reward"].append(eval_metrics["eval_reward_mean"])
             best_eval_reward = max(best_eval_reward, eval_metrics["eval_reward_mean"])
 
-        trackio.log(metrics)
+        if (batch_idx + 1) % LOG_INTERVAL == 0:
+            wandb.log(metrics)
 
         if (batch_idx + 1) % LOG_INTERVAL == 0:
             eval_str = (
                 f" | Eval: {logs['eval_reward'][-1]:.1f}" if logs["eval_reward"] else ""
             )
             print(
-                f"Batch {batch_idx+1:4d}/{num_batches} | Frames: {frames:,} | R: {reward:.2f} | Steps: {steps:3.0f} | Ent: {metrics['entropy']:.3f}{eval_str}"
+                f"Batch {batch_idx+1:4d}/{num_batches} | R: {reward:.2f} | Ent: {metrics['entropy']:.3f}{eval_str}"
             )
 
         if (batch_idx + 1) % VIDEO_INTERVAL == 0:
@@ -353,9 +400,7 @@ def train():
     collector.shutdown()
 
     print("\nFinal evaluation...")
-    final_env = make_env()
-    final_env.transform[0].loc, final_env.transform[0].scale = obs_loc, obs_scale
-    final_metrics = evaluate(policy, final_env, num_episodes=10)
+    final_metrics = evaluate(policy, obs_loc.numpy(), obs_scale.numpy())
     print(
         f"Final reward: {final_metrics['eval_reward_mean']:.1f} ± {final_metrics['eval_reward_std']:.1f}"
     )
@@ -374,12 +419,19 @@ def train():
     )
     print(f"Saved: {CHECKPOINT_PATH}")
 
-    final_env.close()
-    eval_env.close()
-
-    trackio.finish()
+    wandb.finish()
     print(f"\n{'='*70}\nTraining complete! Best eval: {best_eval_reward:.1f}")
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Checkpoint to resume from (fresh optimizer/scheduler)",
+    )
+    args = parser.parse_args()
+    train(resume_path=args.resume)
